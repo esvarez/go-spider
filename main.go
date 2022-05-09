@@ -2,11 +2,12 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"os"
-	"strings"
-
-	"github.com/gocolly/colly"
+	"github.com/PuerkitoBio/goquery"
+	"github.com/geziyor/geziyor"
+	"github.com/geziyor/geziyor/cache/diskcache"
+	"github.com/geziyor/geziyor/client"
+	"github.com/geziyor/geziyor/export"
+	"github.com/geziyor/geziyor/metrics"
 )
 
 type Course struct {
@@ -21,100 +22,73 @@ type Course struct {
 }
 
 func main() {
-	base := "https://boardgamegeek.com"
+
+	// base := "https://boardgamegeek.com"
 	url := "https://boardgamegeek.com/browse/boardgame"
 
-	fName := "courses.json"
-	file, err := os.Create(fName)
-	if err != nil {
-		log.Fatalf("Cannot create file %q: %s\n", fName, err)
-		return
+	func TestAllLinksWithRender(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skipping test in short mode.")
+		}
+	
+		geziyor.NewGeziyor(&geziyor.Options{
+			AllowedDomains: []string{"boardgamegeek.com"},
+			StartURLs:      []string{"https://boardgamegeek.com/browse/boardgame"},
+			ParseFunc: func(g *geziyor.Geziyor, r *client.Response) {
+				g.Exports <- []string{r.Request.URL.String()}
+	
+				r.HTMLDoc.Find("div.game-header-body").Each(func(i int, s *goquery.Selection) {
+					fmt.Println("JUEGO encontrado")
+					if strings.TrimSpace(s.Find("h1 > a").Text()) != "" {
+	
+						//fmt.Println("Juego: ", strings.TrimSpace(s.Find("h1 > a").Text()))
+						//fmt.Println("Description: ", s.Find("div.game-header-title-info > p").Text())
+						// fmt.Println("Short description", s.Find(""))
+						var p, m string
+						s.Find("ul.gameplay > li").Each(func(i int, s *goquery.Selection) {
+							txt := s.Find("div").Text()
+							switch {
+							case strings.Contains(txt, "Players"):
+								p = strings.ReplaceAll(strings.TrimSpace(txt), `	`, "")
+							case strings.Contains(txt, "Min"):
+								m = strings.TrimSpace(txt)
+							}
+						})
+	
+						g.Exports <- map[string]interface{}{
+							"number":      i,
+							"juego":       strings.TrimSpace(s.Find("h1 > a").Text()),
+							"Description": s.Find("div.game-header-title-info > p").Text(),
+							"Players":     p,
+							"Min":         m,
+						}
+	
+						// TODO add big description
+					}
+				})
+	
+				r.HTMLDoc.Find("a.primary").Each(func(i int, s *goquery.Selection) {
+					if href, ok := s.Attr("href"); ok {
+						absoluteURL, _ := r.Request.URL.Parse(href)
+						switch {
+						case strings.Contains(absoluteURL.String(), "/browse/"):
+							fmt.Println("url -> ", absoluteURL.String())
+							//g.Get(absoluteURL.String(), g.Opt.ParseFunc)
+						case strings.Contains(absoluteURL.String(), "/boardgame/"):
+							fmt.Println("game url -> ", absoluteURL.String())
+							g.GetRendered(absoluteURL.String(), g.Opt.ParseFunc)
+						}
+	
+					}
+				})
+			},
+			Exporters:       []export.Exporter{&export.JSONLine{FileName: "1.json"}, &export.JSON{FileName: "2.json"}},
+			Cache:           diskcache.New(".new"),
+			BrowserEndpoint: "ws://localhost:9002",
+			MetricsType:     metrics.Prometheus,
+		}).Start()
 	}
-	defer file.Close()
+	
+	//c.Visit(url)
 
-	// Instantiate default collector
-	c := colly.NewCollector(
-		// Visit only domains: coursera.org, www.coursera.org
-		colly.AllowedDomains("boardgamegeek.com", "www.boardgamegeek.com"),
-
-		// Cache responses to prevent multiple download of pages
-		// even if the collector is restarted
-		colly.CacheDir("./bgg_cache"),
-	)
-
-	// Create another collector to scrape course details
-	detailCollector := c.Clone()
-
-	courses := make([]Course, 0, 20)
-
-	// On every <a> element which has "href" attribute call callback
-	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		// If attribute class is this long string return from callback
-		// As this a is irrelevant
-		if e.Attr("class") == "Button_1qxkboh-o_O-primary_cv02ee-o_O-md_28awn8-o_O-primaryLink_109aggg" {
-			return
-		}
-
-		link := e.Attr("href")
-		// If link start with browse or includes either signup or login return from callback
-		if !strings.HasPrefix(link, "/browse") || strings.Index(link, "=signup") > -1 || strings.Index(link, "=login") > -1 {
-			fmt.Println("nope", link)
-			return
-		}
-		// start scaping the page under the link found
-		fmt.Printf("Scraping %s\n", base+link)
-		//e.Request.Visit(link)
-		e.Request.Visit(base + link)
-	})
-
-	// Before making a request print "Visiting ..."
-	c.OnRequest(func(r *colly.Request) {
-		log.Println("visiting", r.URL.String())
-	})
-
-	// On every <a> element with collection-product-card class call callback
-	c.OnHTML(`a.collection-product-card`, func(e *colly.HTMLElement) {
-		// Activate detailCollector if the link contains "coursera.org/learn"
-		courseURL := e.Request.AbsoluteURL(e.Attr("href"))
-		if strings.Index(courseURL, "coursera.org/learn") != -1 {
-			detailCollector.Visit(courseURL)
-		}
-	})
-
-	// Extract details of the course
-	detailCollector.OnHTML(`div[id=rendered-content]`, func(e *colly.HTMLElement) {
-		log.Println("Course found", e.Request.URL)
-		title := e.ChildText(".banner-title")
-		if title == "" {
-			log.Println("No title found", e.Request.URL)
-		}
-		course := Course{
-			Title:       title,
-			URL:         e.Request.URL.String(),
-			Description: e.ChildText("div.content"),
-			Creator:     e.ChildText("li.banner-instructor-info > a > div > div > span"),
-			Rating:      e.ChildText("span.number-rating"),
-		}
-		// Iterate over div components and add details to course
-		e.ForEach(".AboutCourse .ProductGlance > div", func(_ int, el *colly.HTMLElement) {
-			svgTitle := strings.Split(el.ChildText("div:nth-child(1) svg title"), " ")
-			lastWord := svgTitle[len(svgTitle)-1]
-			switch lastWord {
-			// svg Title: Available Langauges
-			case "languages":
-				course.Language = el.ChildText("div:nth-child(2) > div:nth-child(1)")
-			// svg Title: Mixed/Beginner/Intermediate/Advanced Level
-			case "Level":
-				course.Level = el.ChildText("div:nth-child(2) > div:nth-child(1)")
-			// svg Title: Hours to complete
-			case "complete":
-				course.Commitment = el.ChildText("div:nth-child(2) > div:nth-child(1)")
-			}
-		})
-		courses = append(courses, course)
-	})
-
-	// Start scraping on http://coursera.com/browse
-	c.Visit(url)
-	// c.Visit("https://coursera.org/browse")
 }
